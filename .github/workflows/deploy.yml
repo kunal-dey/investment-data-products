@@ -11,6 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/checkout@v4
+        with:
+          repository: kunal-dey/investment-dbt
+          path: dbt
+
       - uses: astral-sh/setup-uv@v4
         with:
           python-version: "3.12"
@@ -37,6 +42,13 @@ jobs:
             cd /opt/investment_data_products
             sudo -u dagster git fetch origin
             sudo -u dagster git reset --hard origin/main
+            if [ -d dbt/.git ]; then
+              sudo -u dagster git -C dbt fetch origin
+              sudo -u dagster git -C dbt reset --hard origin/main
+            else
+              sudo -u dagster rm -rf dbt
+              sudo -u dagster git clone https://github.com/kunal-dey/investment-dbt.git dbt
+            fi
             sudo -u dagster bash -lc 'export PATH="$HOME/.local/bin:$PATH"; set -a; [ -f /etc/investment_data_products.env ] && . /etc/investment_data_products.env; set +a; cd /opt/investment_data_products; uv python install 3.12; uv sync --group dev --python 3.12; uv run dbt parse --project-dir dbt --profiles-dir dbt'
             sudo cp /opt/investment_data_products/deploy/dagster-webserver.service /etc/systemd/system/
             sudo cp /opt/investment_data_products/deploy/dagster-daemon.service /etc/systemd/system/

@@ -206,7 +206,5 @@ __marimo__/
 /data/
 .dlt/
 
-# dbt
-dbt/target/
-dbt/dbt_packages/
-dbt/logs/
+# dbt lives in kunal-dey/investment-dbt and is cloned into /dbt on deploy
+/dbt/
