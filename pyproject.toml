@@ -9,6 +9,7 @@ dependencies = [
     "dagster-dlt>=0.29.25",
     "dbt-duckdb>=1.11.0",
     "dlt[athena,pyiceberg,s3]>=1.31.0",
+    "numpy>=2.2.6",
 ]
 
 [dependency-groups]
