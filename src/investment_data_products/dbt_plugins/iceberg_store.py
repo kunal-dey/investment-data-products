@@ -4,7 +4,12 @@ from typing import Any
 import pyarrow as pa
 from dbt.adapters.duckdb.plugins import BasePlugin
 from pyiceberg.catalog import load_catalog
-from pyiceberg.exceptions import NamespaceAlreadyExistsError, NoSuchTableError
+from pyiceberg.exceptions import (
+    NamespaceAlreadyExistsError,
+    NoSuchIcebergTableError,
+    NoSuchPropertyException,
+    NoSuchTableError,
+)
 
 
 def _catalog():
@@ -43,15 +48,25 @@ def write_iceberg_table(arrow_table: pa.Table, table_name: str) -> str:
 
     try:
         table = catalog.load_table(identifier)
-        table.overwrite(arrow_table)
     except NoSuchTableError:
-        table = catalog.create_table(
-            identifier,
-            schema=arrow_table.schema,
-            location=location,
-        )
-        table.append(arrow_table)
+        _create_and_append(catalog, identifier, arrow_table, location)
+    except (NoSuchPropertyException, NoSuchIcebergTableError):
+        # Glue already has this name, but the table is not Iceberg
+        # (no table_type parameter). Replace that catalog entry.
+        catalog.drop_table(identifier)
+        _create_and_append(catalog, identifier, arrow_table, location)
+    else:
+        table.overwrite(arrow_table)
     return identifier
+
+
+def _create_and_append(catalog: Any, identifier: str, arrow_table: pa.Table, location: str) -> None:
+    table = catalog.create_table(
+        identifier,
+        schema=arrow_table.schema,
+        location=location,
+    )
+    table.append(arrow_table)
 
 
 class Plugin(BasePlugin):
