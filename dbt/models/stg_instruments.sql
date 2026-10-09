@@ -10,7 +10,5 @@ select
     strike,
     lot_size,
     tick_size,
-    last_price,
-    _dlt_load_id,
-    _dlt_id
+    last_price
 from {{ source('data_platform_catalog', 'instruments') }}
