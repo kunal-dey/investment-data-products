@@ -1,0 +1,15 @@
+[Unit]
+Description=Dagster daemon
+After=network.target
+
+[Service]
+User=dagster
+Group=dagster
+WorkingDirectory=/opt/investment_data_products
+Environment=PYTHONPATH=/opt/investment_data_products/src
+EnvironmentFile=-/etc/investment_data_products.env
+ExecStart=/opt/investment_data_products/.venv/bin/dagster-daemon run -m investment_data_products.definitions
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -37,5 +37,9 @@ jobs:
             cd /opt/investment_data_products
             sudo -u dagster git fetch origin
             sudo -u dagster git reset --hard origin/main
-            sudo -u dagster bash -lc 'export PATH="$HOME/.local/bin:$PATH"; cd /opt/investment_data_products; uv python install 3.12; rm -rf .venv; uv sync --group dev --python 3.12'
+            sudo -u dagster bash -lc 'export PATH="$HOME/.local/bin:$PATH"; cd /opt/investment_data_products; uv python install 3.12; uv sync --group dev --python 3.12'
+            sudo cp /opt/investment_data_products/deploy/dagster-webserver.service /etc/systemd/system/
+            sudo cp /opt/investment_data_products/deploy/dagster-daemon.service /etc/systemd/system/
+            sudo systemctl daemon-reload
+            sudo systemctl enable --now dagster-webserver dagster-daemon
             sudo systemctl restart dagster-webserver dagster-daemon
