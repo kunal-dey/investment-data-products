@@ -7,7 +7,9 @@ User=dagster
 Group=dagster
 WorkingDirectory=/opt/investment_data_products
 Environment=PYTHONPATH=/opt/investment_data_products/src
+Environment=DAGSTER_HOME=/home/dagster/dagster_home
 EnvironmentFile=-/etc/investment_data_products.env
+ExecStartPre=/bin/mkdir -p /home/dagster/dagster_home
 ExecStart=/opt/investment_data_products/.venv/bin/dagster-webserver -h 0.0.0.0 -p 3000 -m investment_data_products.definitions
 Restart=on-failure
 
