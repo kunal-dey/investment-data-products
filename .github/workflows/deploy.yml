@@ -12,9 +12,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
 
       - name: Install
-        run: uv sync
+        run: uv sync --python 3.12
 
       - name: Validate components
         run: uv run dg check yaml
@@ -35,5 +37,5 @@ jobs:
             cd /opt/investment_data_products
             sudo -u dagster git fetch origin
             sudo -u dagster git reset --hard origin/main
-            sudo -u dagster bash -lc 'export PATH="$HOME/.local/bin:$PATH"; cd /opt/investment_data_products; uv sync --group dev'
+            sudo -u dagster bash -lc 'export PATH="$HOME/.local/bin:$PATH"; cd /opt/investment_data_products; uv python install 3.12; rm -rf .venv; uv sync --group dev --python 3.12'
             sudo systemctl restart dagster-webserver dagster-daemon
