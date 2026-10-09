@@ -1,0 +1,19 @@
+name: investment_data_products
+version: "1.0.0"
+config-version: 2
+profile: investment_data_products
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  investment_data_products:
+    +materialized: table
+    +post_hook: "select write_iceberg_relation('{{ this }}') as iceberg_table"

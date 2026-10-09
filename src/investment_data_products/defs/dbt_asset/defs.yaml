@@ -1,0 +1,16 @@
+type: dagster_dbt.DbtProjectComponent
+
+attributes:
+  project: '{{ context.project_root }}/dbt'
+  cli_args:
+    - build
+  translation:
+    group_name: dbt
+
+requirements:
+  env:
+    - S3_LAKE_BASE
+    - GLUE_DATABASE
+    - AWS_ACCESS_KEY_ID
+    - AWS_SECRET_ACCESS_KEY
+    - AWS_REGION

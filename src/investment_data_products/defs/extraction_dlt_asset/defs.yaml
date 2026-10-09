@@ -1,0 +1,16 @@
+type: dagster_dlt.DltLoadCollectionComponent
+
+attributes:
+  loads:
+    - source: .loads.kite_mf_instruments
+      pipeline: .loads.kite_pipeline
+    - source: .loads.kite_instruments
+      pipeline: .loads.kite_instruments_pipeline
+
+requirements:
+  env:
+    - S3_LAKE_BASE
+    - GLUE_DATABASE
+    - AWS_ACCESS_KEY_ID
+    - AWS_SECRET_ACCESS_KEY
+    - AWS_REGION

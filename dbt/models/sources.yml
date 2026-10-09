@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: data_platform_catalog
+    description: Iceberg tables loaded by dlt onto S3.
+    tables:
+      - name: instruments
+        description: Kite tradable instruments dump from /instruments.
+        meta:
+          external_location: "iceberg_scan('{{ env_var('S3_LAKE_BASE') }}/{{ env_var('GLUE_DATABASE') }}/instruments')"

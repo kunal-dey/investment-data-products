@@ -1,0 +1,54 @@
+name: Deploy Dagster
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install
+        run: uv sync
+
+      - name: Validate components
+        run: uv run dg check yaml
+
+  deploy:
+    needs: check
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install
+        run: uv sync
+
+      - name: Deploy
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          S3_LAKE_BASE: ${{ secrets.S3_LAKE_BASE }}
+          GLUE_DATABASE: ${{ secrets.GLUE_DATABASE }}
+          DAGSTER_CLOUD_API_TOKEN: ${{ secrets.DAGSTER_CLOUD_API_TOKEN }}
+          DAGSTER_CLOUD_ORGANIZATION: ${{ vars.DAGSTER_CLOUD_ORGANIZATION }}
+          DAGSTER_CLOUD_DEPLOYMENT: ${{ vars.DAGSTER_CLOUD_DEPLOYMENT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DAGSTER_CLOUD_API_TOKEN:-}" ]; then
+            echo "Set DAGSTER_CLOUD_API_TOKEN (and org/deployment vars) to enable deploy."
+            exit 1
+          fi
+          uvx dagster-cloud serverless deploy \
+            --organization "$DAGSTER_CLOUD_ORGANIZATION" \
+            --deployment "$DAGSTER_CLOUD_DEPLOYMENT" \
+            --location-name investment_data_products \
+            --python-file src/investment_data_products/definitions.py
