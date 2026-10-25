@@ -21,7 +21,7 @@ This is a **lakehouse**: table format is Iceberg, files on S3, Glue as catalog, 
 
 | Layer | Owner | What it does today |
 | --- | --- | --- |
-| **Bronze** | **dlt** (this repo) | Kite dumps (`instruments`, `mf_instruments`), NSE ETFs (`nse_etfs`), and macro ingest (`pulse_news`, `macro_indices`) into Iceberg |
+| **Bronze** | **dlt** (this repo) | Kite dumps (`instruments`, `mf_instruments`), NSE ETFs (`nse_etfs`), Yahoo ETF bars (`etf_bars`), and macro ingest (`pulse_news`, `macro_indices`) into Iceberg |
 | **Silver** | **dbt** (`investment-dbt`) | Cleaned / staged models (`stg_instruments`) written back to Iceberg |
 | **Gold** | **dbt** (`investment-dbt`) | Serving / mart models. None yet; they belong in the dbt repo, not here. |
 
@@ -44,6 +44,7 @@ flowchart LR
     KI["kite_ingest job"]
     MI["macro_ingest job"]
     ETF["nse_etf_ingest job"]
+    BARS["etf_bars jobs"]
   end
 
   subgraph lake["Lakehouse"]
@@ -56,6 +57,7 @@ flowchart LR
   DLT --> KI
   DLT --> MI
   DLT --> ETF
+  DLT --> BARS
   DLT --> S3
   DLT --> GLUE
   S3 --> DBT
@@ -70,10 +72,11 @@ Kite is the only extract that dbt silvers. Pulse and dashboard/drivers stay bron
 
 ```mermaid
 flowchart LR
-  subgraph kiteSrc["Kite / NSE"]
+  subgraph kiteSrc["Kite / NSE / Yahoo"]
     KI["/instruments"]
     MF["/mf/instruments"]
     ETF["NSE ETF watch"]
+    YF["Yahoo 1h"]
   end
 
   subgraph macroSrc["Macro sources"]
@@ -88,6 +91,7 @@ flowchart LR
     B1["instruments"]
     B2["mf_instruments"]
     ET["nse_etfs"]
+    EB["etf_bars"]
     PN["pulse_news"]
     MI["macro_indices"]
   end
@@ -102,7 +106,7 @@ flowchart LR
 
   KI --> B1 --> S1 -.-> G1
   MF --> B2
-  ETF --> ET
+  ETF --> ET --> YF --> EB
   Pulse --> PN
   Dash --> MI
   Nseix --> MI
@@ -117,13 +121,14 @@ flowchart LR
 YAML component: `src/investment_data_products/defs/extraction_dlt_asset/defs.yaml` (`group_name: extract`).
 Python: `src/investment_data_products/defs/extraction_dlt_asset/loads.py`.
 
-In Dagster: **Assets → group `extract`**. Job **`kite_ingest`** materializes `instruments` and `mf_instruments`. Job **`nse_etf_ingest`** materializes `nse_etfs`. Job **`macro_ingest`** materializes `pulse_news` and `macro_indices`. Pulse selectors and indicator names: `defs/extraction_dlt_asset/macro_fetch.py`.
+In Dagster: **Assets → group `extract`**. Job **`kite_ingest`** materializes `instruments` and `mf_instruments`. Job **`nse_etf_ingest`** materializes `nse_etfs`. Job **`etf_bars_backfill`** (manual, ~1y) then **`etf_bars_hourly`** (schedule `etf_bars_hourly_ist`, weekdays 9:00–16:00 IST, stopped until you enable it) materialize `etf_bars`. Job **`macro_ingest`** materializes `pulse_news` and `macro_indices`. Pulse selectors and indicator names: `defs/extraction_dlt_asset/macro_fetch.py`.
 
 | Asset | Holds | Origin | Iceberg PK | Write |
 | --- | --- | --- | --- | --- |
 | `instruments` | One row per Kite tradable (equity + F&O) | Kite `/instruments` | `instrument_token` | replace |
 | `mf_instruments` | One row per Kite mutual-fund scheme | Kite `/mf/instruments` | `tradingsymbol` | replace |
 | `nse_etfs` | One row per listed NSE ETF (quotes + NAV) | NSE `/api/etf` | `symbol` | replace |
+| `etf_bars` | Hourly OHLCV per NSE ETF | Yahoo `SYMBOL.NS` (`yfinance.download`) | `symbol` + `bar_ts` | merge |
 | `pulse_news` | One row per Pulse news card this scrape | Zerodha Pulse HTML | `pulse_id` | replace |
 | `macro_indices` | Latest reading per named indicator or driver | India Macro Indicators + GIFT/FPI | `name` | merge |
 
@@ -153,6 +158,19 @@ Glue database = `GLUE_DATABASE`. Location = `${S3_LAKE_BASE}/${GLUE_DATABASE}/<a
 | `pct_change_30d` / `pct_change_365d` | float | Trailing % |
 | `as_of` | timestamptz | NSE snapshot time (IST parsed to UTC) |
 | `source` | string | `nse` |
+
+`nse_etfs` is the Yahoo universe for `etf_bars` (not dbt listings). Run **`nse_etf_ingest`** first, then one **`etf_bars_backfill`**, then enable **`etf_bars_hourly_ist`**.
+
+**`etf_bars`** — one row per symbol and hourly bar. Merge on `symbol` + `bar_ts`. Backfill uses Yahoo `period=1y`; hourly uses `period=5d` (dlt merge is idempotent). Yahoo 1h for NSE names is often capped at about 60 days.
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `symbol` | string | NSE ticker (no `.NS` suffix) |
+| `bar_ts` | timestamptz | Bar start (UTC) |
+| `open` / `high` / `low` / `close` | float | OHLC |
+| `volume` | int64 | Shares |
+| `interval` | string | `1h` |
+| `source` | string | `yahoo` |
 
 **`pulse_news`** — one row per Pulse card (headline, time, related items) from this ingest.
 
@@ -185,7 +203,7 @@ Source `data_platform_catalog.instruments` is an external DuckDB `iceberg_scan` 
 
 `${S3_LAKE_BASE}/${GLUE_DATABASE}/instruments`
 
-Model `stg_instruments` is a cleaned slice of `instruments` (one row per instrument, selected fields). Models are tables. A project-wide **post_hook** calls DuckDB UDF `write_iceberg_relation`, implemented in `src/investment_data_products/dbt_plugins/iceberg_store.py` (PyIceberg + Glue overwrite/create).
+Model `stg_instruments` is a cleaned slice of `instruments` (one row per instrument, selected fields). Models are tables. A project-wide **post_hook** (`write_model_to_iceberg`) calls the dbt-duckdb plugin `store` in `src/investment_data_products/dbt_plugins/iceberg_store.py` (PyIceberg + Glue overwrite/create).
 
 DuckDB Iceberg reads need `unsafe_enable_version_guessing: true` because dlt often writes `v{n}.metadata.json` without `version-hint.text`. `numpy` is required for the UDF.
 
@@ -203,16 +221,18 @@ GPU jobs also require `RUNPOD_API_KEY`, `VLLM_API_KEY`, `VLLM_PORT` (see [GPU po
 
 ## Asset graph
 
-- Group **`extract`**: `instruments`, `mf_instruments`, `nse_etfs`, `pulse_news`, `macro_indices`
+- Group **`extract`**: `instruments`, `mf_instruments`, `nse_etfs`, `etf_bars`, `pulse_news`, `macro_indices`
 - Group **`dbt`**: `stg_instruments` (depends on `instruments`)
 - Job **`kite_ingest`**: `instruments` + `mf_instruments` (no GPU tag)
 - Job **`nse_etf_ingest`**: `nse_etfs` (no GPU tag)
+- Job **`etf_bars_backfill`**: `etf_bars` (~1y, manual, no GPU tag)
+- Job **`etf_bars_hourly`**: `etf_bars` (5d window; schedule `etf_bars_hourly_ist`, no GPU tag)
 - Job **`macro_ingest`**: `pulse_news` + `macro_indices` (no GPU tag)
 - Job **`runpod_gpu_pod`**: optional GPU create/wait (`needs_runpod=true`) — see [GPU pods](#gpu-pods-runpod)
 
 ## GPU pods (RunPod)
 
-Optional GPU lifecycle on **[RunPod Pods](https://docs.runpod.io/pods/overview)** (not Serverless). This is **not** bronze/silver/gold. Job `runpod_gpu_pod` is **check → pick cheapest GPU → create → health wait**. An unready pod is **deleted** on health timeout. `kite_ingest`, `nse_etf_ingest`, and `macro_ingest` do not start GPUs.
+Optional GPU lifecycle on **[RunPod Pods](https://docs.runpod.io/pods/overview)** (not Serverless). This is **not** bronze/silver/gold. Job `runpod_gpu_pod` is **check → pick cheapest GPU → create → health wait**. An unready pod is **deleted** on health timeout. `kite_ingest`, `nse_etf_ingest`, `etf_bars_backfill`, `etf_bars_hourly`, and `macro_ingest` do not start GPUs.
 
 Create does **not** default to RTX 4090. It picks the cheapest **compatible in-stock** GPU at **≤ $0.25/hr** (llm and kev ≥16 GB SM 7.5+, embedding ≥8 GB TEI-capable), or waits **up to 10 minutes**, then fails without creating. Do not pin `RUNPOD_GPU_TYPE` unless you are debugging one SKU.
 
@@ -300,7 +320,7 @@ flowchart TB
 
 | What is running | Sensor |
 | --- | --- |
-| dlt / dbt / `kite_ingest` / `nse_etf_ingest` / `macro_ingest` only | Kill pods (lakehouse does not need GPU) |
+| dlt / dbt / `kite_ingest` / `nse_etf_ingest` / `etf_bars_*` / `macro_ingest` only | Kill pods (lakehouse does not need GPU) |
 | `runpod_gpu_pod` `STARTED` (llm and/or embedding, including health wait) | Do not kill |
 | Later inference job tagged `needs_runpod=true` `STARTED` | Do not kill |
 | Only untagged jobs | Kill pods |

@@ -15,6 +15,9 @@ attributes:
     - source: .loads.nse_etf
       pipeline: .loads.nse_etf_pipeline
       translation: *extract
+    - source: .loads.etf_bars
+      pipeline: .loads.etf_bars_pipeline
+      translation: *extract
 
 requirements:
   env:

@@ -214,6 +214,103 @@ nse_etf_pipeline = dlt.pipeline(
 )
 
 
+def _yahoo_period() -> str:
+    if os.environ.get("ETF_BARS_MODE") == "backfill":
+        return "1y"
+    from dagster._core.execution.context.compute import current_execution_context
+
+    ctx = current_execution_context.get()
+    if ctx is not None and ctx.job_name == "etf_bars_backfill":
+        return "1y"
+    return "5d"
+
+
+def _etf_bars_frame():
+    import pandas as pd
+    import yfinance as yf
+    from pyiceberg.exceptions import NoSuchIcebergTableError, NoSuchTableError
+
+    from investment_data_products.dbt_plugins.iceberg_store import _catalog
+
+    try:
+        symbols = (
+            _catalog()
+            .load_table(f"{glue_database}.nse_etfs")
+            .scan(selected_fields=("symbol",))
+            .to_pandas()["symbol"]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+    except (NoSuchTableError, NoSuchIcebergTableError) as exc:
+        raise RuntimeError("nse_etfs missing; run nse_etf_ingest first") from exc
+    if not symbols:
+        raise RuntimeError("nse_etfs is empty; run nse_etf_ingest first")
+
+    tickers = [f"{s}.NS" for s in symbols]
+    raw = yf.download(
+        " ".join(tickers),
+        interval="1h",
+        period=_yahoo_period(),
+        group_by="ticker",
+        threads=True,
+        progress=False,
+        auto_adjust=False,
+    )
+    if raw.empty:
+        raise RuntimeError("yfinance returned no etf bars")
+    if isinstance(raw.columns, pd.MultiIndex):
+        fields = {str(x).lower() for x in raw.columns.get_level_values(0)}
+        level = 1 if "close" in fields else 0
+        df = raw.stack(level=level).rename_axis(["bar_ts", "yahoo"]).reset_index()
+    else:
+        df = raw.rename_axis("bar_ts").reset_index()
+        df["yahoo"] = tickers[0]
+    df.columns = [str(c).lower().replace(" ", "_") for c in df.columns]
+    df["symbol"] = df["yahoo"].str.removesuffix(".NS")
+    df["bar_ts"] = pd.to_datetime(df["bar_ts"], utc=True)
+    out = df.assign(interval="1h", source="yahoo")[
+        ["symbol", "bar_ts", "open", "high", "low", "close", "volume", "interval", "source"]
+    ].dropna(subset=["close"])
+    out["volume"] = out["volume"].fillna(0).astype("int64")
+    return out
+
+
+@dlt.source(name="etf_bars")
+def _etf_bars():
+    @dlt.resource(
+        name="etf_bars",
+        write_disposition="merge",
+        table_format="iceberg",
+        primary_key=["symbol", "bar_ts"],
+        columns={
+            "symbol": {"data_type": "text"},
+            "bar_ts": {"data_type": "timestamp"},
+            "open": {"data_type": "double"},
+            "high": {"data_type": "double"},
+            "low": {"data_type": "double"},
+            "close": {"data_type": "double"},
+            "volume": {"data_type": "bigint"},
+            "interval": {"data_type": "text"},
+            "source": {"data_type": "text"},
+        },
+    )
+    def etf_bars():
+        """Yahoo 1h NSE ETF bars. Iceberg merge on symbol+bar_ts."""
+        yield _etf_bars_frame()
+
+    return etf_bars
+
+
+etf_bars = _etf_bars()
+
+etf_bars_pipeline = dlt.pipeline(
+    pipeline_name="etf_bars",
+    destination=s3_iceberg,
+    dataset_name=glue_database,
+)
+
+
 if __name__ == "__main__":
     load_info = kite_instruments_pipeline.run(kite_instruments)
     print(load_info)

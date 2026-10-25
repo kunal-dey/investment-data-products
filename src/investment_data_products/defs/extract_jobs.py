@@ -1,6 +1,13 @@
 import os
 
-from dagster import AssetKey, AssetSelection, define_asset_job, definitions
+from dagster import (
+    AssetKey,
+    AssetSelection,
+    DefaultScheduleStatus,
+    ScheduleDefinition,
+    define_asset_job,
+    definitions,
+)
 
 
 def lake_asset_key(table: str) -> AssetKey:
@@ -32,9 +39,38 @@ nse_etf_ingest = define_asset_job(
     description="NSE ETF market watch Iceberg replace.",
 )
 
+etf_bars_backfill = define_asset_job(
+    name="etf_bars_backfill",
+    selection=AssetSelection.keys(lake_asset_key("etf_bars")),
+    description="Yahoo 1h ETF bars (~1y, Iceberg merge). Manual; run after nse_etf_ingest.",
+)
+
+etf_bars_hourly = define_asset_job(
+    name="etf_bars_hourly",
+    selection=AssetSelection.keys(lake_asset_key("etf_bars")),
+    description="Yahoo 1h ETF bars (5d window, Iceberg merge).",
+)
+
+etf_bars_hourly_schedule = ScheduleDefinition(
+    name="etf_bars_hourly_ist",
+    job=etf_bars_hourly,
+    cron_schedule="0 9-16 * * 1-5",
+    execution_timezone="Asia/Kolkata",
+    default_status=DefaultScheduleStatus.STOPPED,
+)
+
 
 @definitions
 def defs():
     from dagster import Definitions
 
-    return Definitions(jobs=[kite_ingest, macro_ingest, nse_etf_ingest])
+    return Definitions(
+        jobs=[
+            kite_ingest,
+            macro_ingest,
+            nse_etf_ingest,
+            etf_bars_backfill,
+            etf_bars_hourly,
+        ],
+        schedules=[etf_bars_hourly_schedule],
+    )

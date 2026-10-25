@@ -3,7 +3,7 @@ import shutil
 import stat
 from pathlib import Path
 
-from dagster import definitions, load_from_defs_folder
+from dagster import Definitions, definitions, in_process_executor, load_from_defs_folder
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -82,4 +82,8 @@ _patch_dbt_state_on_windows()
 
 @definitions
 def defs():
-    return load_from_defs_folder(path_within_project=Path(__file__).parent)
+    loaded = load_from_defs_folder(path_within_project=Path(__file__).parent)
+    # Windows spawn + many dlt steps hits WinError 6 (invalid handle); dbt then skips.
+    if os.name == "nt":
+        return Definitions.merge(loaded, Definitions(executor=in_process_executor))
+    return loaded

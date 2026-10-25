@@ -27,6 +27,14 @@ def _catalog():
     )
 
 
+def _as_table(data: Any) -> pa.Table:
+    if isinstance(data, pa.Table):
+        return data
+    if hasattr(data, "read_all"):
+        return data.read_all()
+    return pa.table(data)
+
+
 def _without_null_types(arrow_table: pa.Table) -> pa.Table:
     """Iceberg v2 cannot store pa.null(); all-None columns become string."""
     fields = []
@@ -46,11 +54,12 @@ def write_iceberg_table(arrow_table: pa.Table, table_name: str) -> str:
     warehouse = os.environ["S3_LAKE_BASE"].rstrip("/")
     identifier = f"{database}.{table_name}"
     location = f"{warehouse}/{database}/{table_name}"
+    arrow_table = _as_table(arrow_table)
 
     try:
         from dlt.common.libs.pyiceberg import ensure_iceberg_compatible_arrow_data
 
-        arrow_table = ensure_iceberg_compatible_arrow_data(arrow_table)
+        arrow_table = _as_table(ensure_iceberg_compatible_arrow_data(arrow_table))
     except Exception:
         pass
     arrow_table = _without_null_types(arrow_table)
@@ -85,10 +94,17 @@ def _create_and_append(catalog: Any, identifier: str, arrow_table: pa.Table, loc
 
 
 class Plugin(BasePlugin):
-    def configure_connection(self, conn: Any) -> None:
-        def _write(qualified_name: str) -> str:
-            table_name = qualified_name.replace('"', "").split(".")[-1]
-            arrow_table = conn.sql(f"select * from {qualified_name}").arrow()
-            return write_iceberg_table(arrow_table, table_name)
+    def store(self, target_config: Any) -> None:
+        from dbt.adapters.duckdb.connections import DuckDBConnectionManager
 
-        conn.create_function("write_iceberg_relation", _write)
+        relation = target_config.relation
+        catalog = os.path.splitext(os.path.basename(getattr(self.creds, "path", "") or ""))[0]
+        catalog = catalog if catalog and catalog != ":memory:" else "memory"
+        schema = relation.schema or "main"
+        ident = relation.identifier
+        env = DuckDBConnectionManager.env()
+        conn = env.conn if getattr(env, "conn", None) is not None else env.handle().cursor()
+        arrow = conn.execute(
+            f'select * from "{catalog}"."{schema}"."{ident}"'
+        ).fetch_arrow_table()
+        write_iceberg_table(arrow, ident)
