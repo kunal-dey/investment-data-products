@@ -4,8 +4,17 @@ attributes:
   loads:
     - source: .loads.kite_mf_instruments
       pipeline: .loads.kite_pipeline
+      translation: &extract
+        group_name: extract
     - source: .loads.kite_instruments
       pipeline: .loads.kite_instruments_pipeline
+      translation: *extract
+    - source: .loads.macro_ingest
+      pipeline: .loads.macro_pipeline
+      translation: *extract
+    - source: .loads.nse_etf
+      pipeline: .loads.nse_etf_pipeline
+      translation: *extract
 
 requirements:
   env:

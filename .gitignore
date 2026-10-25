@@ -208,3 +208,12 @@ __marimo__/
 
 # dbt lives in kunal-dey/investment-dbt and is cloned into /dbt on deploy
 /dbt/
+
+# Dagster copies the dbt project here (do not commit nested .git)
+src/investment_data_products/defs/.local_defs_state/
+.dagster_home/
+.tmp_dagster_home_*/
+.tmp_sqlite_uri_test/
+
+# LanceDB story index (macro_news vectors; not Iceberg)
+**/lancedb/

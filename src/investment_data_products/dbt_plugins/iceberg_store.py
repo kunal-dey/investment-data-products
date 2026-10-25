@@ -27,6 +27,20 @@ def _catalog():
     )
 
 
+def _without_null_types(arrow_table: pa.Table) -> pa.Table:
+    """Iceberg v2 cannot store pa.null(); all-None columns become string."""
+    fields = []
+    arrays = []
+    for field in arrow_table.schema:
+        column = arrow_table.column(field.name)
+        if pa.types.is_null(field.type):
+            column = pa.nulls(arrow_table.num_rows, type=pa.string())
+            field = pa.field(field.name, pa.string(), nullable=True)
+        fields.append(field)
+        arrays.append(column)
+    return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+
+
 def write_iceberg_table(arrow_table: pa.Table, table_name: str) -> str:
     database = os.environ["GLUE_DATABASE"]
     warehouse = os.environ["S3_LAKE_BASE"].rstrip("/")
@@ -39,6 +53,7 @@ def write_iceberg_table(arrow_table: pa.Table, table_name: str) -> str:
         arrow_table = ensure_iceberg_compatible_arrow_data(arrow_table)
     except Exception:
         pass
+    arrow_table = _without_null_types(arrow_table)
 
     catalog = _catalog()
     try:
