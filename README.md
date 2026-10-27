@@ -121,7 +121,7 @@ flowchart LR
 YAML component: `src/investment_data_products/defs/extraction_dlt_asset/defs.yaml` (`group_name: extract`).
 Python: `src/investment_data_products/defs/extraction_dlt_asset/loads.py`.
 
-In Dagster: **Assets → group `extract`**. Job **`kite_ingest`** materializes `instruments` and `mf_instruments`. Job **`nse_etf_ingest`** materializes `nse_etfs`. Job **`etf_bars_backfill`** (manual, ~1y) then **`etf_bars_hourly`** (schedule `etf_bars_hourly_ist`, weekdays 9:00–16:00 IST, stopped until you enable it) materialize `etf_bars`. Job **`macro_ingest`** materializes `pulse_news` and `macro_indices`. Pulse selectors and indicator names: `defs/extraction_dlt_asset/macro_fetch.py`.
+In Dagster: **Assets → group `extract`**. Job **`kite_ingest`** materializes `instruments` and `mf_instruments`. Job **`nse_etf_ingest`** materializes `nse_etfs`. Job **`etf_bars_backfill`** (manual, ~1y) then **`etf_bars_hourly`** (schedule `etf_bars_hourly_ist`, weekdays 9:00–16:00 IST, stopped until you enable it) materialize `nse_etfs` then `etf_bars`. Job **`macro_ingest`** materializes `pulse_news` and `macro_indices`. Pulse selectors and indicator names: `defs/extraction_dlt_asset/macro_fetch.py`.
 
 | Asset | Holds | Origin | Iceberg PK | Write |
 | --- | --- | --- | --- | --- |
@@ -159,7 +159,7 @@ Glue database = `GLUE_DATABASE`. Location = `${S3_LAKE_BASE}/${GLUE_DATABASE}/<a
 | `as_of` | timestamptz | NSE snapshot time (IST parsed to UTC) |
 | `source` | string | `nse` |
 
-`nse_etfs` is the Yahoo universe for `etf_bars` (not dbt listings). Run **`nse_etf_ingest`** first, then one **`etf_bars_backfill`**, then enable **`etf_bars_hourly_ist`**.
+`nse_etfs` is the Yahoo universe for `etf_bars` (not dbt listings). `etf_bars` depends on `nse_etfs`. Jobs **`etf_bars_backfill`** / **`etf_bars_hourly`** materialize the watch list first, then bars. Enable **`etf_bars_hourly_ist`** after one successful backfill.
 
 **`etf_bars`** — one row per symbol and hourly bar. Merge on `symbol` + `bar_ts`. Backfill uses Yahoo `period=1y`; hourly uses `period=5d` (dlt merge is idempotent). Yahoo 1h for NSE names is often capped at about 60 days.
 
@@ -225,8 +225,8 @@ GPU jobs also require `RUNPOD_API_KEY`, `VLLM_API_KEY`, `VLLM_PORT` (see [GPU po
 - Group **`dbt`**: `stg_instruments` (depends on `instruments`)
 - Job **`kite_ingest`**: `instruments` + `mf_instruments` (no GPU tag)
 - Job **`nse_etf_ingest`**: `nse_etfs` (no GPU tag)
-- Job **`etf_bars_backfill`**: `etf_bars` (~1y, manual, no GPU tag)
-- Job **`etf_bars_hourly`**: `etf_bars` (5d window; schedule `etf_bars_hourly_ist`, no GPU tag)
+- Job **`etf_bars_backfill`**: `nse_etfs` then `etf_bars` (~1y, manual, no GPU tag)
+- Job **`etf_bars_hourly`**: `nse_etfs` then `etf_bars` (5d window; schedule `etf_bars_hourly_ist`, no GPU tag)
 - Job **`macro_ingest`**: `pulse_news` + `macro_indices` (no GPU tag)
 - Job **`runpod_gpu_pod`**: optional GPU create/wait (`needs_runpod=true`) — see [GPU pods](#gpu-pods-runpod)
 
@@ -297,7 +297,7 @@ Three frozen stacks. Do not copy env or start flags from one kind to the other.
 
 ### Cleanup sensor
 
-**One** sensor `runpod_idle_cleanup` (not one per model). It never cancels dlt/dbt runs.
+**One** sensor `runpod_idle_cleanup` (not one per model). It never cancels dlt/dbt runs. If `RUNPOD_API_KEY` is unset it **skips** (lakehouse-only hosts); it does not fail the tick. `runpod_gpu_pod` still requires the key.
 
 ```mermaid
 flowchart TB
@@ -426,7 +426,7 @@ systemd units in `deploy/`:
 
 Both units set `DAGSTER_HOME`, `PYTHONPATH`, and `PATH` including `.venv/bin` so the `dbt` executable is found.
 
-The env file should include AWS keys, `S3_LAKE_BASE`, `GLUE_DATABASE`, `DAGSTER_HOME`, `PATH=/opt/investment_data_products/.venv/bin:...`, and for GPU pods `RUNPOD_API_KEY`, `VLLM_API_KEY`, `VLLM_PORT`. The **daemon** must see those RunPod vars or it cannot list/stop pods.
+The env file should include AWS keys, `S3_LAKE_BASE`, `GLUE_DATABASE`, `DAGSTER_HOME`, `PATH=/opt/investment_data_products/.venv/bin:...`. GPU pods also need `RUNPOD_API_KEY`, `VLLM_API_KEY`, `VLLM_PORT` on the daemon if you use `runpod_gpu_pod`. Without `RUNPOD_API_KEY`, `runpod_idle_cleanup` skips.
 
 Use **Python 3.12 via uv** on the host, not Ubuntu’s 3.14 (PyIceberg/`mmh3` wheels).
 

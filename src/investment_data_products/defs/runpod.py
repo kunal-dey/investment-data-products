@@ -73,6 +73,10 @@ def _required(name: str) -> str:
     return value
 
 
+def _runpod_configured() -> bool:
+    return bool(EnvVar("RUNPOD_API_KEY").get_value())
+
+
 def _prefix() -> str:
     return os.environ.get("RUNPOD_NAME_PREFIX", "investment-data-products")
 
@@ -829,6 +833,8 @@ def _gpu_jobs_busy(context: SensorEvaluationContext) -> bool:
 )
 def runpod_idle_cleanup(context: SensorEvaluationContext):
     global _startup_reap_done
+    if not _runpod_configured():
+        return SkipReason("RUNPOD_API_KEY unset; skip pod cleanup")
     if not _startup_reap_done:
         ids = kill_tagged_pods()
         _startup_reap_done = True

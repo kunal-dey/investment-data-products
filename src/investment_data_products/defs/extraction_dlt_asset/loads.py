@@ -79,13 +79,34 @@ s3_iceberg = filesystem(
     },
 )
 
-kite_pipeline = dlt.pipeline(
+
+def _pipeline(**kwargs):
+    """Per-run working dir. Shared ~/.dlt/pipelines/<name> races when two jobs load etf_bars."""
+    pipe = dlt.pipeline(**kwargs)
+
+    def _active():
+        from dagster._core.execution.context.compute import current_execution_context
+
+        ctx = current_execution_context.get()
+        rid = (ctx.run_id if ctx is not None else None) or f"pid{os.getpid()}"
+        return dlt.pipeline(
+            pipelines_dir=os.path.join(os.path.expanduser("~"), ".dlt", "runs", rid),
+            **kwargs,
+        )
+
+    pipe.run = lambda *args, **kw: _active().run(*args, **kw)
+    pipe.drop = lambda *args, **kw: _active().drop(*args, **kw)
+    pipe.drop_pending_packages = lambda *args, **kw: _active().drop_pending_packages(*args, **kw)
+    return pipe
+
+
+kite_pipeline = _pipeline(
     pipeline_name="kite_mf_instruments",
     destination=s3_iceberg,
     dataset_name=glue_database,
 )
 
-kite_instruments_pipeline = dlt.pipeline(
+kite_instruments_pipeline = _pipeline(
     pipeline_name="kite_instruments",
     destination=s3_iceberg,
     dataset_name=glue_database,
@@ -155,7 +176,7 @@ def _macro_ingest():
 macro_ingest = _macro_ingest()
 
 
-macro_pipeline = dlt.pipeline(
+macro_pipeline = _pipeline(
     pipeline_name="macro_ingest",
     destination=s3_iceberg,
     dataset_name=glue_database,
@@ -207,7 +228,7 @@ def _nse_etf():
 
 nse_etf = _nse_etf()
 
-nse_etf_pipeline = dlt.pipeline(
+nse_etf_pipeline = _pipeline(
     pipeline_name="nse_etf",
     destination=s3_iceberg,
     dataset_name=glue_database,
@@ -304,7 +325,7 @@ def _etf_bars():
 
 etf_bars = _etf_bars()
 
-etf_bars_pipeline = dlt.pipeline(
+etf_bars_pipeline = _pipeline(
     pipeline_name="etf_bars",
     destination=s3_iceberg,
     dataset_name=glue_database,

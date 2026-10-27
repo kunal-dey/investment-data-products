@@ -39,16 +39,21 @@ nse_etf_ingest = define_asset_job(
     description="NSE ETF market watch Iceberg replace.",
 )
 
+_etf_bars_sel = AssetSelection.keys(
+    lake_asset_key("nse_etfs"),
+    lake_asset_key("etf_bars"),
+)
+
 etf_bars_backfill = define_asset_job(
     name="etf_bars_backfill",
-    selection=AssetSelection.keys(lake_asset_key("etf_bars")),
-    description="Yahoo 1h ETF bars (~1y, Iceberg merge). Manual; run after nse_etf_ingest.",
+    selection=_etf_bars_sel,
+    description="NSE ETF watch then Yahoo 1h bars (~1y, Iceberg merge).",
 )
 
 etf_bars_hourly = define_asset_job(
     name="etf_bars_hourly",
-    selection=AssetSelection.keys(lake_asset_key("etf_bars")),
-    description="Yahoo 1h ETF bars (5d window, Iceberg merge).",
+    selection=_etf_bars_sel,
+    description="NSE ETF watch then Yahoo 1h bars (5d window, Iceberg merge).",
 )
 
 etf_bars_hourly_schedule = ScheduleDefinition(
