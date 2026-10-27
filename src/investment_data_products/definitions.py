@@ -3,7 +3,7 @@ import shutil
 import stat
 from pathlib import Path
 
-from dagster import Definitions, definitions, in_process_executor, load_from_defs_folder
+from dagster import AssetKey, Definitions, definitions, in_process_executor, load_from_defs_folder
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -80,9 +80,17 @@ _ensure_dbt_on_path()
 _patch_dbt_state_on_windows()
 
 
+def _etf_bars_depends_on_watch(spec):
+    database = os.environ.get("GLUE_DATABASE")
+    if database and spec.key == AssetKey([database, "etf_bars"]):
+        return spec.replace_attributes(deps=[AssetKey([database, "nse_etfs"])])
+    return spec
+
+
 @definitions
 def defs():
     loaded = load_from_defs_folder(path_within_project=Path(__file__).parent)
+    loaded = loaded.map_asset_specs(func=_etf_bars_depends_on_watch)
     # Windows spawn + many dlt steps hits WinError 6 (invalid handle); dbt then skips.
     if os.name == "nt":
         return Definitions.merge(loaded, Definitions(executor=in_process_executor))

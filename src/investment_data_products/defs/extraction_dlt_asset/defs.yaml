@@ -17,11 +17,7 @@ attributes:
       translation: *extract
     - source: .loads.etf_bars
       pipeline: .loads.etf_bars_pipeline
-      translation:
-        group_name: extract
-        deps:
-          - "{{ env.GLUE_DATABASE }}"
-          - nse_etfs
+      translation: *extract
 
 requirements:
   env:

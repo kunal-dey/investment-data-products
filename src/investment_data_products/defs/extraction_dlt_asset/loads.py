@@ -80,39 +80,23 @@ s3_iceberg = filesystem(
 )
 
 
-class _IsolatedPipeline:
-    """Per-run dlt working dir; keep the same instance for drop/run/default_schema."""
-
-    def __init__(self, **kwargs):
-        self._kwargs = kwargs
-        self._live = dlt.pipeline(**kwargs)
-
-    def _bind(self):
-        from dagster._core.execution.context.compute import current_execution_context
-
-        ctx = current_execution_context.get()
-        rid = (ctx.run_id if ctx is not None else None) or f"pid{os.getpid()}"
-        self._live = dlt.pipeline(
-            pipelines_dir=os.path.join(os.path.expanduser("~"), ".dlt", "runs", rid),
-            **self._kwargs,
-        )
-        return self._live
-
-    def run(self, *args, **kwargs):
-        return self._bind().run(*args, **kwargs)
-
-    def drop(self, *args, **kwargs):
-        return self._bind().drop(*args, **kwargs)
-
-    def drop_pending_packages(self, *args, **kwargs):
-        return self._bind().drop_pending_packages(*args, **kwargs)
-
-    def __getattr__(self, name):
-        return getattr(self._live, name)
-
-
 def _pipeline(**kwargs):
-    return _IsolatedPipeline(**kwargs)
+    """Must return a real dlt.Pipeline (dagster-dlt type-checks). Drop stale packages after a cancelled load."""
+    pipe = dlt.pipeline(**kwargs)
+    run = pipe.run
+
+    def _run(*args, **kw):
+        try:
+            pipe.abort_packages()
+        except Exception:
+            try:
+                pipe.drop_pending_packages()
+            except Exception:
+                pass
+        return run(*args, **kw)
+
+    pipe.run = _run
+    return pipe
 
 
 kite_pipeline = _pipeline(
