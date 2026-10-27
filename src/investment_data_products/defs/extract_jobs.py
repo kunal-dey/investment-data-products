@@ -58,10 +58,11 @@ etf_bars_hourly = define_asset_job(
 
 etf_bars_hourly_schedule = ScheduleDefinition(
     name="etf_bars_hourly_ist",
-    job=etf_bars_hourly,
+    target=_etf_bars_sel,
     cron_schedule="0 9-16 * * 1-5",
     execution_timezone="Asia/Kolkata",
     default_status=DefaultScheduleStatus.STOPPED,
+    description="Weekdays 9:00–16:00 IST: nse_etfs then etf_bars (5d Yahoo).",
 )
 
 
