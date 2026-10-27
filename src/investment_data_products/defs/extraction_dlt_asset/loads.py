@@ -80,24 +80,39 @@ s3_iceberg = filesystem(
 )
 
 
-def _pipeline(**kwargs):
-    """Per-run working dir. Shared ~/.dlt/pipelines/<name> races when two jobs load etf_bars."""
-    pipe = dlt.pipeline(**kwargs)
+class _IsolatedPipeline:
+    """Per-run dlt working dir; keep the same instance for drop/run/default_schema."""
 
-    def _active():
+    def __init__(self, **kwargs):
+        self._kwargs = kwargs
+        self._live = dlt.pipeline(**kwargs)
+
+    def _bind(self):
         from dagster._core.execution.context.compute import current_execution_context
 
         ctx = current_execution_context.get()
         rid = (ctx.run_id if ctx is not None else None) or f"pid{os.getpid()}"
-        return dlt.pipeline(
+        self._live = dlt.pipeline(
             pipelines_dir=os.path.join(os.path.expanduser("~"), ".dlt", "runs", rid),
-            **kwargs,
+            **self._kwargs,
         )
+        return self._live
 
-    pipe.run = lambda *args, **kw: _active().run(*args, **kw)
-    pipe.drop = lambda *args, **kw: _active().drop(*args, **kw)
-    pipe.drop_pending_packages = lambda *args, **kw: _active().drop_pending_packages(*args, **kw)
-    return pipe
+    def run(self, *args, **kwargs):
+        return self._bind().run(*args, **kwargs)
+
+    def drop(self, *args, **kwargs):
+        return self._bind().drop(*args, **kwargs)
+
+    def drop_pending_packages(self, *args, **kwargs):
+        return self._bind().drop_pending_packages(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._live, name)
+
+
+def _pipeline(**kwargs):
+    return _IsolatedPipeline(**kwargs)
 
 
 kite_pipeline = _pipeline(
@@ -269,25 +284,33 @@ def _etf_bars_frame():
         raise RuntimeError("nse_etfs is empty; run nse_etf_ingest first")
 
     tickers = [f"{s}.NS" for s in symbols]
-    raw = yf.download(
-        " ".join(tickers),
-        interval="1h",
-        period=_yahoo_period(),
-        group_by="ticker",
-        threads=True,
-        progress=False,
-        auto_adjust=False,
-    )
-    if raw.empty:
+    period = _yahoo_period()
+    parts = []
+    for i in range(0, len(tickers), 10):
+        batch = tickers[i : i + 10]
+        raw = yf.download(
+            " ".join(batch),
+            interval="1h",
+            period=period,
+            group_by="ticker",
+            threads=True,
+            progress=False,
+            auto_adjust=False,
+        )
+        if raw.empty:
+            continue
+        if isinstance(raw.columns, pd.MultiIndex):
+            fields = {str(x).lower() for x in raw.columns.get_level_values(0)}
+            level = 1 if "close" in fields else 0
+            df = raw.stack(level=level).rename_axis(["bar_ts", "yahoo"]).reset_index()
+        else:
+            df = raw.rename_axis("bar_ts").reset_index()
+            df["yahoo"] = batch[0]
+        df.columns = [str(c).lower().replace(" ", "_") for c in df.columns]
+        parts.append(df)
+    if not parts:
         raise RuntimeError("yfinance returned no etf bars")
-    if isinstance(raw.columns, pd.MultiIndex):
-        fields = {str(x).lower() for x in raw.columns.get_level_values(0)}
-        level = 1 if "close" in fields else 0
-        df = raw.stack(level=level).rename_axis(["bar_ts", "yahoo"]).reset_index()
-    else:
-        df = raw.rename_axis("bar_ts").reset_index()
-        df["yahoo"] = tickers[0]
-    df.columns = [str(c).lower().replace(" ", "_") for c in df.columns]
+    df = pd.concat(parts, ignore_index=True)
     df["symbol"] = df["yahoo"].str.removesuffix(".NS")
     df["bar_ts"] = pd.to_datetime(df["bar_ts"], utc=True)
     out = df.assign(interval="1h", source="yahoo")[
