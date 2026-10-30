@@ -47,7 +47,7 @@ _etf_bars_sel = AssetSelection.keys(
 etf_bars_backfill = define_asset_job(
     name="etf_bars_backfill",
     selection=_etf_bars_sel,
-    description="NSE ETF watch then Yahoo 1h bars (~1y, Iceberg merge).",
+    description="NSE ETF watch then Yahoo 1h bars (1y if etf_bars is empty, else 5d merge).",
 )
 
 etf_bars_hourly = define_asset_job(

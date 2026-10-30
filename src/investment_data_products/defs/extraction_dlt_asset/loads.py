@@ -234,15 +234,17 @@ nse_etf_pipeline = _pipeline(
 )
 
 
-def _yahoo_period() -> str:
+def _yahoo_period(catalog) -> str:
     if os.environ.get("ETF_BARS_MODE") == "backfill":
         return "1y"
-    from dagster._core.execution.context.compute import current_execution_context
+    from pyiceberg.exceptions import NoSuchIcebergTableError, NoSuchTableError
 
-    ctx = current_execution_context.get()
-    if ctx is not None and ctx.job_name == "etf_bars_backfill":
-        return "1y"
-    return "5d"
+    try:
+        if catalog.load_table(f"{glue_database}.etf_bars").scan(limit=1).to_arrow().num_rows:
+            return "5d"
+    except (NoSuchTableError, NoSuchIcebergTableError):
+        pass
+    return "1y"
 
 
 def _etf_bars_frame():
@@ -252,10 +254,10 @@ def _etf_bars_frame():
 
     from investment_data_products.dbt_plugins.iceberg_store import _catalog
 
+    catalog = _catalog()
     try:
         symbols = (
-            _catalog()
-            .load_table(f"{glue_database}.nse_etfs")
+            catalog.load_table(f"{glue_database}.nse_etfs")
             .scan(selected_fields=("symbol",))
             .to_pandas()["symbol"]
             .dropna()
@@ -268,7 +270,7 @@ def _etf_bars_frame():
         raise RuntimeError("nse_etfs is empty; run nse_etf_ingest first")
 
     tickers = [f"{s}.NS" for s in symbols]
-    period = _yahoo_period()
+    period = _yahoo_period(catalog)
     parts = []
     for i in range(0, len(tickers), 10):
         batch = tickers[i : i + 10]

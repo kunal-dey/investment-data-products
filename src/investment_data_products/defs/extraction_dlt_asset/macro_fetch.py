@@ -157,8 +157,22 @@ def index_row(payload: dict, name: str):
     }
 
 
+def _indicator_key(text: str) -> str:
+    return "".join(ch.lower() for ch in text if ch.isalnum())
+
+
 def series_row(items, name: str, group: str):
+    want = _indicator_key(name)
     match = next((item for item in items if item.get("indicator_name") == name), None)
+    if match is None:
+        match = next(
+            (
+                item
+                for item in items
+                if want and want in _indicator_key(item.get("indicator_name") or "")
+            ),
+            None,
+        )
     if not match or match.get("latest_value") in (None, ""):
         return None
     return {
