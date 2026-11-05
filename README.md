@@ -136,7 +136,7 @@ Glue database = `GLUE_DATABASE`. Location = `${S3_LAKE_BASE}/${GLUE_DATABASE}/<a
 | `as_of` | timestamptz | NSE snapshot time (IST parsed to UTC) |
 | `source` | string | `nse` |
 
-**`equity_price_volume`** — one row per Kite EQ minute bar. Universe is `kite.instruments()` with `instrument_type=EQ` (NSE and BSE cash). Kite historical is fetched **3 names/sec**; Iceberg **append** every **350 names** (no upsert). Reruns can duplicate rows. Token is `${S3_LAKE_BASE}/kite/access_token.json` (valid until 06:00 IST the next day). API key is Secrets Manager `credential_store.KITE_API_KEY`.
+**`equity_price_volume`** — one row per Kite EQ minute bar. Universe is `kite.instruments()` with `instrument_type=EQ` (NSE and BSE cash). Kite historical is fetched **3 names/sec**; Iceberg **append** every **51 names** (no upsert). Reruns can duplicate rows. Token is `${S3_LAKE_BASE}/kite/access_token.json` (valid until 06:00 IST the next day). API key is Secrets Manager `credential_store.KITE_API_KEY`.
 
 | Column | Type | Meaning |
 | --- | --- | --- |

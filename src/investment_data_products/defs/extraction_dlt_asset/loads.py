@@ -351,12 +351,12 @@ def _run_equity_price_volume(dlt_run):
         raise RuntimeError("Kite returned no EQ instruments")
 
     total = len(instruments)
-    _progress(f"equity_price_volume start: {total} EQ instruments (Kite 3/s, Iceberg every 350)")
+    _progress(f"equity_price_volume start: {total} EQ instruments (Kite 3/s, Iceberg every 51)")
 
     end = datetime.now()
     start = end - timedelta(days=60)
     kite_batch = 3
-    iceberg_flush = 350
+    iceberg_flush = 51
     pending = []
     pending_names = 0
     load_info = None
@@ -405,7 +405,7 @@ def _equity_price_volume():
         columns=_EQUITY_COLUMNS,
     )
     def equity_price_volume():
-        """Kite 1-minute EQ OHLCV. Fetch 3/s; Iceberg append every 350 names."""
+        """Kite 1-minute EQ OHLCV. Fetch 3/s; Iceberg append every 51 names."""
         yield from ()
 
     return equity_price_volume
