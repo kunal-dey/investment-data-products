@@ -1,13 +1,6 @@
 import os
 
-from dagster import (
-    AssetKey,
-    AssetSelection,
-    DefaultScheduleStatus,
-    ScheduleDefinition,
-    define_asset_job,
-    definitions,
-)
+from dagster import AssetKey, AssetSelection, Definitions, define_asset_job, definitions
 
 
 def lake_asset_key(table: str) -> AssetKey:
@@ -24,59 +17,25 @@ kite_ingest = define_asset_job(
     description="Kite /instruments and /mf/instruments Iceberg replace.",
 )
 
-macro_ingest = define_asset_job(
-    name="macro_ingest",
-    selection=AssetSelection.keys(
-        lake_asset_key("pulse_news"),
-        lake_asset_key("macro_indices"),
-    ),
-    description="Pulse news cards and macro_indices Iceberg (replace / merge).",
-)
-
 nse_etf_ingest = define_asset_job(
     name="nse_etf_ingest",
     selection=AssetSelection.keys(lake_asset_key("nse_etfs")),
     description="NSE ETF market watch Iceberg replace.",
 )
 
-_etf_bars_sel = AssetSelection.keys(
-    lake_asset_key("nse_etfs"),
-    lake_asset_key("etf_bars"),
-)
-
-etf_bars_backfill = define_asset_job(
-    name="etf_bars_backfill",
-    selection=_etf_bars_sel,
-    description="NSE ETF watch then Yahoo 1h bars (1y if etf_bars is empty, else 5d merge).",
-)
-
-etf_bars_hourly = define_asset_job(
-    name="etf_bars_hourly",
-    selection=_etf_bars_sel,
-    description="NSE ETF watch then Yahoo 1h bars (5d window, Iceberg merge).",
-)
-
-etf_bars_hourly_schedule = ScheduleDefinition(
-    name="etf_bars_hourly_ist",
-    target=_etf_bars_sel,
-    cron_schedule="0 9-16 * * 1-5",
-    execution_timezone="Asia/Kolkata",
-    default_status=DefaultScheduleStatus.STOPPED,
-    description="Weekdays 9:00–16:00 IST: nse_etfs then etf_bars (5d Yahoo).",
+equity_price_volume_historical_ingest = define_asset_job(
+    name="equity_price_volume_historical_ingest",
+    selection=AssetSelection.keys(lake_asset_key("equity_price_volume")),
+    description="Kite 1-minute EQ OHLCV (60d Iceberg append).",
 )
 
 
 @definitions
 def defs():
-    from dagster import Definitions
-
     return Definitions(
         jobs=[
             kite_ingest,
-            macro_ingest,
             nse_etf_ingest,
-            etf_bars_backfill,
-            etf_bars_hourly,
+            equity_price_volume_historical_ingest,
         ],
-        schedules=[etf_bars_hourly_schedule],
     )

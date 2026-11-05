@@ -1,13 +1,24 @@
+import asyncio
 import csv
 import io
 import json
+import logging
 import os
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import dlt
+import httpx
 from dagster import EnvVar
 from dlt.destinations import filesystem
 from dlt.sources.rest_api import rest_api_source
 from requests import Response
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import ReadTimeout
+
+_log = logging.getLogger(__name__)
 
 s3_lake_base = EnvVar("S3_LAKE_BASE").get_value().rstrip("/")
 glue_database = EnvVar("GLUE_DATABASE").get_value()
@@ -36,7 +47,6 @@ def kite_rest_csv_source(resource_name: str, path: str, **resource_hints):
             "client": {
                 "base_url": "https://api.kite.trade",
                 "headers": {"X-Kite-Version": "3"},
-                "paginator": "single_page",
             },
             "resources": [
                 {
@@ -79,10 +89,42 @@ s3_iceberg = filesystem(
     },
 )
 
+_DLT_PIPELINES = Path(__file__).resolve().parents[4] / ".dlt" / "pipelines"
+
+
+def _bind_drop(pipe):
+    """Windows can lock dlt gzip files; skip wipe rather than fail the asset."""
+    orig_drop = pipe.drop
+
+    def drop(*args, **kwargs):
+        last = None
+        for delay in (0, 0.5, 1.5, 3.0):
+            if delay:
+                time.sleep(delay)
+            try:
+                return orig_drop(*args, **kwargs)
+            except PermissionError as exc:
+                last = exc
+        try:
+            pipe.abort_packages()
+        except Exception:
+            pass
+        try:
+            pipe.drop_pending_packages()
+        except Exception:
+            pass
+        _log.warning("dlt drop skipped after file lock: %s", last)
+        return pipe
+
+    pipe.drop = drop
+    return pipe
+
 
 def _pipeline(**kwargs):
     """Must return a real dlt.Pipeline (dagster-dlt type-checks). Drop stale packages after a cancelled load."""
-    pipe = dlt.pipeline(**kwargs)
+    _DLT_PIPELINES.mkdir(parents=True, exist_ok=True)
+    kwargs.setdefault("pipelines_dir", str(_DLT_PIPELINES))
+    pipe = _bind_drop(dlt.pipeline(**kwargs))
     run = pipe.run
 
     def _run(*args, **kw):
@@ -111,77 +153,67 @@ kite_instruments_pipeline = _pipeline(
     dataset_name=glue_database,
 )
 
-# Fail closed on an empty/blocked Pulse page. Weekday homepages are often 200+;
-# weekends are thinner (~100–150) and must still replace.
-MIN_PULSE = 50
-
-
-@dlt.source(name="macro_ingest")
-def _macro_ingest():
-    """Resources fetch at run time. Instantiate below so dagster-dlt sees selected_resources."""
-
-    @dlt.resource(
-        name="pulse_news",
-        write_disposition="replace",
-        table_format="iceberg",
-        primary_key="pulse_id",
-        columns={
-            "pulse_id": {"data_type": "text"},
-            "headline": {"data_type": "text"},
-            "summary": {"data_type": "text"},
-            "published_at": {"data_type": "timestamp"},
-            "related_headlines": {"data_type": "text"},
-            "related_count": {"data_type": "bigint"},
-        },
-    )
-    def pulse_news():
-        """Zerodha Pulse cards (headline, time, related). Iceberg replace."""
-        from .macro_fetch import EXPECTED_NAMES, fetch_all
-
-        pulse, macros, _ = fetch_all()
-        missing = sorted(EXPECTED_NAMES - {row["name"] for row in macros})
-        if len(pulse) < MIN_PULSE or missing:
-            raise RuntimeError(
-                f"ingest guard failed: pulse_news={len(pulse)} (need {MIN_PULSE}), "
-                f"missing layer names={missing}"
-            )
-        yield from pulse
-
-    @dlt.resource(
-        name="macro_indices",
-        write_disposition="merge",
-        table_format="iceberg",
-        primary_key="name",
-        columns={
-            "name": {"data_type": "text"},
-            "group": {"data_type": "text"},
-            "value": {"data_type": "double"},
-            "unit": {"data_type": "text"},
-            "as_of": {"data_type": "timestamp"},
-            "source": {"data_type": "text"},
-        },
-    )
-    def macro_indices():
-        """India Macro Indicators + short-horizon drivers. Iceberg merge on name."""
-        from .macro_fetch import fetch_all
-
-        _, macros, drivers = fetch_all()
-        yield from macros
-        yield from drivers
-
-    return pulse_news, macro_indices
-
-
-macro_ingest = _macro_ingest()
-
-
-macro_pipeline = _pipeline(
-    pipeline_name="macro_ingest",
-    destination=s3_iceberg,
-    dataset_name=glue_database,
-)
-
 MIN_ETF = 50
+_NSE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Referer": "https://www.nseindia.com/",
+}
+
+
+def _num(value):
+    if value in (None, "", "-"):
+        return None
+    return float(str(value).replace(",", ""))
+
+
+def _fetch_etfs():
+    with httpx.Client(headers=_NSE_HEADERS, follow_redirects=True, timeout=30) as http:
+        http.get("https://www.nseindia.com")
+        response = http.get("https://www.nseindia.com/api/etf")
+        response.raise_for_status()
+        payload = response.json()
+    stamp = payload.get("timestamp")
+    as_of = (
+        datetime.strptime(stamp, "%d-%b-%Y %H:%M:%S")
+        .replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        .astimezone(timezone.utc)
+        if stamp
+        else datetime.now(timezone.utc)
+    )
+    rows = []
+    for item in payload.get("data") or []:
+        symbol = item.get("symbol")
+        if not symbol:
+            continue
+        qty = _num(item.get("qty"))
+        rows.append(
+            {
+                "symbol": str(symbol),
+                "underlying": item.get("assets"),
+                "series": item.get("series"),
+                "open": _num(item.get("open")),
+                "high": _num(item.get("high")),
+                "low": _num(item.get("low")),
+                "prev_close": _num(item.get("prevClose")),
+                "ltp": _num(item.get("ltP")),
+                "change": _num(item.get("chn")),
+                "pct_change": _num(item.get("per")),
+                "volume": None if qty is None else int(qty),
+                "traded_value": _num(item.get("trdVal")),
+                "nav": _num(item.get("nav")),
+                "week_high": _num(item.get("wkhi")),
+                "week_low": _num(item.get("wklo")),
+                "pct_change_30d": _num(item.get("perChange30d")),
+                "pct_change_365d": _num(item.get("perChange365d")),
+                "as_of": as_of,
+                "source": "nse",
+            }
+        )
+    return rows
 
 
 @dlt.source(name="nse_etf")
@@ -215,9 +247,7 @@ def _nse_etf():
     )
     def nse_etfs():
         """NSE ETF market watch. Iceberg replace."""
-        from .macro_fetch import fetch_etfs
-
-        rows = fetch_etfs()
+        rows = _fetch_etfs()
         if len(rows) < MIN_ETF:
             raise RuntimeError(f"ingest guard failed: nse_etfs={len(rows)} (need {MIN_ETF})")
         yield from rows
@@ -234,115 +264,176 @@ nse_etf_pipeline = _pipeline(
 )
 
 
-def _yahoo_period(catalog) -> str:
-    if os.environ.get("ETF_BARS_MODE") == "backfill":
-        return "1y"
-    from pyiceberg.exceptions import NoSuchIcebergTableError, NoSuchTableError
-
-    try:
-        if catalog.load_table(f"{glue_database}.etf_bars").scan(limit=1).to_arrow().num_rows:
-            return "5d"
-    except (NoSuchTableError, NoSuchIcebergTableError):
-        pass
-    return "1y"
-
-
-def _etf_bars_frame():
-    import pandas as pd
-    import yfinance as yf
-    from pyiceberg.exceptions import NoSuchIcebergTableError, NoSuchTableError
-
-    from investment_data_products.dbt_plugins.iceberg_store import _catalog
-
-    catalog = _catalog()
-    try:
-        symbols = (
-            catalog.load_table(f"{glue_database}.nse_etfs")
-            .scan(selected_fields=("symbol",))
-            .to_pandas()["symbol"]
-            .dropna()
-            .unique()
-            .tolist()
-        )
-    except (NoSuchTableError, NoSuchIcebergTableError) as exc:
-        raise RuntimeError("nse_etfs missing; run nse_etf_ingest first") from exc
-    if not symbols:
-        raise RuntimeError("nse_etfs is empty; run nse_etf_ingest first")
-
-    tickers = [f"{s}.NS" for s in symbols]
-    period = _yahoo_period(catalog)
-    parts = []
-    for i in range(0, len(tickers), 10):
-        batch = tickers[i : i + 10]
-        raw = yf.download(
-            " ".join(batch),
-            interval="1h",
-            period=period,
-            group_by="ticker",
-            threads=True,
-            progress=False,
-            auto_adjust=False,
-        )
-        if raw.empty:
-            continue
-        if isinstance(raw.columns, pd.MultiIndex):
-            fields = {str(x).lower() for x in raw.columns.get_level_values(0)}
-            level = 1 if "close" in fields else 0
-            df = raw.stack(level=level).rename_axis(["bar_ts", "yahoo"]).reset_index()
-        else:
-            df = raw.rename_axis("bar_ts").reset_index()
-            df["yahoo"] = batch[0]
-        df.columns = [str(c).lower().replace(" ", "_") for c in df.columns]
-        parts.append(df)
-    if not parts:
-        raise RuntimeError("yfinance returned no etf bars")
-    df = pd.concat(parts, ignore_index=True)
-    df["symbol"] = df["yahoo"].str.removesuffix(".NS")
-    df["bar_ts"] = pd.to_datetime(df["bar_ts"], utc=True)
-    out = df.assign(interval="1h", source="yahoo")[
-        ["symbol", "bar_ts", "open", "high", "low", "close", "volume", "interval", "source"]
-    ].dropna(subset=["close"])
-    out["volume"] = out["volume"].fillna(0).astype("int64")
-    return out
+_EQUITY_COLUMNS = {
+    "symbol": {"data_type": "text"},
+    "instrument_token": {"data_type": "bigint"},
+    "bar_ts": {"data_type": "timestamp"},
+    "open": {"data_type": "double"},
+    "high": {"data_type": "double"},
+    "low": {"data_type": "double"},
+    "close": {"data_type": "double"},
+    "volume": {"data_type": "bigint"},
+    "interval": {"data_type": "text"},
+    "source": {"data_type": "text"},
+}
 
 
-@dlt.source(name="etf_bars")
-def _etf_bars():
+def _equity_batch_resource(rows):
     @dlt.resource(
-        name="etf_bars",
-        write_disposition="merge",
+        name="equity_price_volume",
+        write_disposition="append",
         table_format="iceberg",
-        primary_key=["symbol", "bar_ts"],
-        columns={
-            "symbol": {"data_type": "text"},
-            "bar_ts": {"data_type": "timestamp"},
-            "open": {"data_type": "double"},
-            "high": {"data_type": "double"},
-            "low": {"data_type": "double"},
-            "close": {"data_type": "double"},
-            "volume": {"data_type": "bigint"},
-            "interval": {"data_type": "text"},
-            "source": {"data_type": "text"},
-        },
+        columns=_EQUITY_COLUMNS,
     )
-    def etf_bars():
-        """Yahoo 1h NSE ETF bars. Iceberg merge on symbol+bar_ts."""
-        yield _etf_bars_frame()
+    def equity_price_volume():
+        yield from rows
 
-    return etf_bars
+    return equity_price_volume
 
 
-etf_bars = _etf_bars()
+def _historical_data(kite, token, start, end):
+    last = None
+    for attempt in range(5):
+        try:
+            return kite.historical_data(token, start, end, "minute")
+        except (ReadTimeout, RequestsConnectionError, TimeoutError) as exc:
+            last = exc
+            time.sleep(min(2**attempt, 16))
+    raise last
 
-etf_bars_pipeline = _pipeline(
-    pipeline_name="etf_bars",
-    destination=s3_iceberg,
-    dataset_name=glue_database,
+
+async def _equity_candles(kite, instrument, start, end):
+    token = instrument["instrument_token"]
+    symbol = instrument["tradingsymbol"]
+    candles = await asyncio.to_thread(_historical_data, kite, token, start, end)
+    return [
+        {
+            "symbol": symbol,
+            "instrument_token": int(token),
+            "bar_ts": candle["date"],
+            "open": float(candle["open"]),
+            "high": float(candle["high"]),
+            "low": float(candle["low"]),
+            "close": float(candle["close"]),
+            "volume": int(candle.get("volume") or 0),
+            "interval": "minute",
+            "source": "kite",
+        }
+        for candle in candles
+    ]
+
+
+async def _equity_batch_rows(kite, batch, start, end):
+    chunks = await asyncio.gather(
+        *(_equity_candles(kite, instrument, start, end) for instrument in batch)
+    )
+    rows = []
+    for chunk in chunks:
+        rows.extend(chunk)
+    return rows
+
+
+def _progress(msg: str) -> None:
+    """Dagster compute logs capture stdout, not logging.info without a handler."""
+    print(msg, flush=True)
+
+
+def _run_equity_price_volume(dlt_run):
+    from .utils.fetch_kite_access_token import kite_client
+
+    kite = kite_client()
+    instruments = [
+        instrument
+        for instrument in kite.instruments()
+        if instrument.get("instrument_type", "").upper() == "EQ"
+    ]
+    if not instruments:
+        raise RuntimeError("Kite returned no EQ instruments")
+
+    total = len(instruments)
+    _progress(f"equity_price_volume start: {total} EQ instruments (Kite 3/s, Iceberg every 350)")
+
+    end = datetime.now()
+    start = end - timedelta(days=60)
+    kite_batch = 3
+    iceberg_flush = 350
+    pending = []
+    pending_names = 0
+    load_info = None
+    for i in range(0, total, kite_batch):
+        batch = instruments[i : i + kite_batch]
+        t0 = time.monotonic()
+        pending.extend(asyncio.run(_equity_batch_rows(kite, batch, start, end)))
+        pending_names += len(batch)
+        covered = i + len(batch)
+        elapsed = time.monotonic() - t0
+        if i + kite_batch < total and elapsed < 1:
+            time.sleep(1 - elapsed)
+        _progress(
+            f"equity_price_volume covered {covered}/{total} ({100.0 * covered / total:.1f}%) "
+            f"kite_batch={len(batch)} buffer_names={pending_names} buffer_rows={len(pending)}"
+        )
+        if pending_names >= iceberg_flush:
+            if pending:
+                _progress(
+                    f"equity_price_volume iceberg append starting at {covered}/{total} "
+                    f"({len(pending)} rows) — S3 folder appears after this load finishes"
+                )
+                load_info = dlt_run(_equity_batch_resource(pending))
+                _progress(f"equity_price_volume iceberg append done at {covered}/{total}")
+            pending = []
+            pending_names = 0
+    if pending:
+        _progress(
+            f"equity_price_volume iceberg append leftover starting {pending_names} names "
+            f"({len(pending)} rows) covered {total}/{total}"
+        )
+        load_info = dlt_run(_equity_batch_resource(pending))
+        _progress(f"equity_price_volume iceberg append leftover done {total}/{total}")
+    if load_info is None:
+        raise RuntimeError("Kite historical_data returned no EQ minute bars")
+    _progress(f"equity_price_volume finished {total}/{total} instruments")
+    return load_info
+
+
+@dlt.source(name="equity_price_volume")
+def _equity_price_volume():
+    @dlt.resource(
+        name="equity_price_volume",
+        write_disposition="append",
+        table_format="iceberg",
+        columns=_EQUITY_COLUMNS,
+    )
+    def equity_price_volume():
+        """Kite 1-minute EQ OHLCV. Fetch 3/s; Iceberg append every 350 names."""
+        yield from ()
+
+    return equity_price_volume
+
+
+equity_price_volume = _equity_price_volume()
+
+_DLT_PIPELINES.mkdir(parents=True, exist_ok=True)
+equity_price_volume_pipeline = _bind_drop(
+    dlt.pipeline(
+        pipeline_name="equity_price_volume",
+        destination=s3_iceberg,
+        dataset_name=glue_database,
+        pipelines_dir=str(_DLT_PIPELINES),
+    )
 )
+_equity_dlt_run = equity_price_volume_pipeline.run
 
 
-if __name__ == "__main__":
-    load_info = kite_instruments_pipeline.run(kite_instruments)
-    print(load_info)
-    print(f"Glue catalog: {glue_database}.instruments")
-    print(f"Iceberg location: {s3_lake_base}/{glue_database}/instruments")
+def _equity_pipeline_run(*args, **kwargs):
+    try:
+        equity_price_volume_pipeline.abort_packages()
+    except Exception:
+        try:
+            equity_price_volume_pipeline.drop_pending_packages()
+        except Exception:
+            pass
+    return _run_equity_price_volume(_equity_dlt_run)
+
+
+equity_price_volume_pipeline.run = _equity_pipeline_run
